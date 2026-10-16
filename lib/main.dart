@@ -1,23 +1,75 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
+
+String? attr(String s, String k) {
+  final m = RegExp(r'\b' + k + r'''\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))''',
+      caseSensitive: false).firstMatch(s);
+  return m == null ? null : (m.group(1) ?? m.group(2) ?? m.group(3));
+}
+
+String summarize(String html) {
+  final o = <String>[];
+  for (final m in RegExp(r'<form([^>]*)>', caseSensitive: false).allMatches(html)) {
+    o.add('FORM action=${attr(m.group(1)!, 'action')} method=${attr(m.group(1)!, 'method')}');
+  }
+  for (final m in RegExp(r'<(input|select|textarea)([^>]*)>', caseSensitive: false)
+      .allMatches(html)) {
+    final at = m.group(2)!;
+    final n = attr(at, 'name');
+    if (n == null) continue;
+    var v = attr(at, 'value') ?? '';
+    if (RegExp(r'psk|pass|key|pwd|secret', caseSensitive: false).hasMatch(n)) v = '***';
+    if (v.length > 40) v = v.substring(0, 40);
+    o.add('${m.group(1)} name=$n type=${attr(at, 'type') ?? '-'} value=$v');
+  }
+  var hints = 0;
+  for (final m in RegExp(r'[^\n]*(?:wlan_id|wlan_idx|submit-url)[^\n]*').allMatches(html)) {
+    if (hints++ >= 6) break;
+    final t = m.group(0)!.trim();
+    o.add('HINT ${t.length > 140 ? t.substring(0, 140) : t}');
+  }
+  return o.isEmpty ? '(koi form nahi mila)' : o.join('\n');
+}
 
 class Api {
   final String ip, user, pass;
   Api(this.ip, this.user, this.pass);
   Map<String, String> get _h =>
       {'Authorization': 'Basic ${base64Encode(utf8.encode('$user:$pass'))}'};
+
+  Future<http.Response> _raw(String p) =>
+      http.get(Uri.parse('http://$ip$p'), headers: _h).timeout(const Duration(seconds: 8));
+
   Future<String> _get(String p) async {
-    final r = await http.get(Uri.parse('http://$ip$p'), headers: _h)
-        .timeout(const Duration(seconds: 8));
+    final r = await _raw(p);
     if (r.statusCode != 200) throw 'HTTP ${r.statusCode}';
     return r.body;
   }
+
   Future<bool> login() async => !(await _get('/home.htm')).contains('wizard_new');
+
   Future<List<String>> clients() async {
     final h = await _get('/wlstatbl.htm?wlan_id=0');
     return RegExp(r'(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}')
         .allMatches(h).map((m) => m.group(0)!.toLowerCase()).toSet().toList();
+  }
+
+  // Sirf GET: router ke pages parhta hai, kuch badalta nahi.
+  Future<String> inspect() async {
+    final out = StringBuffer();
+    for (final p in ['/wlbasic.htm', '/wlwpa.htm', '/wlactrl.htm']) {
+      out.writeln('--- $p');
+      try {
+        final r = await _raw(p);
+        out.writeln('status ${r.statusCode}, ${r.body.length} bytes');
+        out.writeln(summarize(r.body));
+      } catch (e) {
+        out.writeln('error: $e');
+      }
+    }
+    return out.toString();
   }
 }
 
@@ -129,8 +181,14 @@ class _HomeState extends State<Home> {
     const titles = ['Dashboard', 'Connected Devices', 'Wi-Fi Settings'];
     final pages = [Dash(macs.length, busy), DevicesTab(macs), const WifiTab()];
     return Scaffold(
-      appBar: AppBar(title: Text(titles[tab]),
-          actions: [IconButton(icon: const Icon(Icons.refresh), onPressed: load)]),
+      appBar: AppBar(title: Text(titles[tab]), actions: [
+        IconButton(
+          icon: const Icon(Icons.bug_report),
+          onPressed: () => Navigator.push(c,
+              MaterialPageRoute(builder: (_) => InspectPage(widget.api))),
+        ),
+        IconButton(icon: const Icon(Icons.refresh), onPressed: load),
+      ]),
       body: pages[tab],
       bottomNavigationBar: NavigationBar(
         selectedIndex: tab,
@@ -143,6 +201,46 @@ class _HomeState extends State<Home> {
       ),
     );
   }
+}
+
+class InspectPage extends StatefulWidget {
+  final Api api;
+  const InspectPage(this.api, {super.key});
+  @override
+  State<InspectPage> createState() => _InspectPageState();
+}
+
+class _InspectPageState extends State<InspectPage> {
+  String report = '';
+  bool busy = false;
+
+  Future<void> run() async {
+    setState(() { busy = true; report = ''; });
+    try { report = await widget.api.inspect(); } catch (e) { report = 'Error: $e'; }
+    if (mounted) setState(() => busy = false);
+  }
+
+  @override
+  Widget build(BuildContext c) => Scaffold(
+        appBar: AppBar(title: const Text('Router ke forms')),
+        body: ListView(padding: const EdgeInsets.all(16), children: [
+          const Text('Yeh sirf parhta hai, router mein kuch nahi badalta.'),
+          const SizedBox(height: 8),
+          FilledButton(onPressed: busy ? null : run,
+              child: Text(busy ? '...' : 'Forms dekhein')),
+          if (report.isNotEmpty)
+            TextButton(
+              onPressed: () {
+                Clipboard.setData(ClipboardData(text: report));
+                ScaffoldMessenger.of(c).showSnackBar(
+                    const SnackBar(content: Text('Copy ho gaya')));
+              },
+              child: const Text('Copy karein'),
+            ),
+          if (report.isNotEmpty)
+            SelectableText(report, style: const TextStyle(fontSize: 11)),
+        ]),
+      );
 }
 
 class Dash extends StatelessWidget {
