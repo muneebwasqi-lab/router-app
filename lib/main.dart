@@ -1,94 +1,32 @@
-
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
-// ================= CONFIG: agar kuch na chale to sirf yahan badlein =================
-class Cfg {
-  static const bands = {'wlan1': '5GHz', 'wlan2': '2.4GHz'};
-  static const idx = {'wlan1': '0', 'wlan2': '1'}; // wlan index
-  static const basicForm = '/boafrm/formWlanSetup';
-  static const secForm = '/boafrm/formWlEncrypt';
-  static const aclForm = '/boafrm/formWlAc';
-  static const rebootForm = '/boafrm/formReboot';
-  static const clientsPage = '/wlstatbl.htm';
-}
-// ====================================================================================
-
-class Router {
+class Api {
   final String ip, user, pass;
-  final List<String> log = [];
-  Router(this.ip, this.user, this.pass);
-
-  Map<String, String> get _h => {
-        'Authorization': 'Basic ${base64Encode(utf8.encode('$user:$pass'))}',
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Referer': 'http://$ip/home.htm',
-      };
-
-  Future<String> get(String path) async {
-    final r = await http.get(Uri.parse('http://$ip$path'), headers: _h)
+  Api(this.ip, this.user, this.pass);
+  Map<String, String> get _h =>
+      {'Authorization': 'Basic ${base64Encode(utf8.encode('$user:$pass'))}'};
+  Future<String> _get(String p) async {
+    final r = await http.get(Uri.parse('http://$ip$p'), headers: _h)
         .timeout(const Duration(seconds: 8));
-    log.add('GET $path -> ${r.statusCode}');
+    if (r.statusCode != 200) throw 'HTTP ${r.statusCode}';
     return r.body;
   }
-
-  Future<String> post(String path, Map<String, String> f) async {
-    final r = await http.post(Uri.parse('http://$ip$path'), headers: _h, body: f)
-        .timeout(const Duration(seconds: 8));
-    log.add('POST $path ${f.keys.join(",")} -> ${r.statusCode}\n'
-        '${r.body.length > 300 ? r.body.substring(0, 300) : r.body}');
-    return r.body;
+  Future<bool> login() async => !(await _get('/home.htm')).contains('wizard_new');
+  Future<List<String>> clients() async {
+    final h = await _get('/wlstatbl.htm?wlan_id=0');
+    return RegExp(r'(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}')
+        .allMatches(h).map((m) => m.group(0)!.toLowerCase()).toSet().toList();
   }
-
-  Future<bool> login() async {
-    final r = await http.get(Uri.parse('http://$ip/home.htm'), headers: _h)
-        .timeout(const Duration(seconds: 8));
-    log.add('LOGIN home.htm -> ${r.statusCode}');
-    return r.statusCode == 200 && !r.body.contains('wizard_new');
-  }
-
-  Future<void> setBasic(String b, {String? ssid, bool? enabled}) => post(Cfg.basicForm, {
-        'wlan_id': Cfg.idx[b]!,
-        if (enabled != null) 'wlanDisabled': enabled ? 'OFF' : 'ON',
-        if (ssid != null) 'ssid': ssid,
-        'submit-url': '/wlbasic.htm',
-        'save': 'Apply Changes',
-      });
-
-  Future<void> setPassword(String b, String key) => post(Cfg.secForm, {
-        'wlan_id': Cfg.idx[b]!,
-        'method': '6', // WPA2
-        'wpaAuth': 'psk',
-        'ciphersuite': 'aes',
-        'wpa2ciphersuite': 'aes',
-        'pskFormat': '0',
-        'pskValue': key,
-        'submit-url': '/wlwpa.htm',
-        'save': 'Apply Changes',
-      });
-
-  Future<List<String>> clients(String b) async {
-    final html = await get('${Cfg.clientsPage}?wlan_id=${Cfg.idx[b]}');
-    final m = RegExp(r'([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})').allMatches(html);
-    return m.map((e) => e.group(1)!.toLowerCase()).toSet().toList();
-  }
-
-  Future<void> block(String b, String mac) => post(Cfg.aclForm, {
-        'wlan_id': Cfg.idx[b]!,
-        'wlanAcEnabled': '2', // Deny Listed
-        'mac': mac.replaceAll(':', ''),
-        'comment': 'blocked by app',
-        'addFilterMac': 'Apply Changes',
-        'submit-url': '/wlactrl.htm',
-      });
-
-  Future<void> reboot() => post(Cfg.rebootForm, {'save': 'Reboot', 'submit-url': '/reboot.htm'});
 }
+
+void soon(BuildContext c) => ScaffoldMessenger.of(c).showSnackBar(
+    const SnackBar(content: Text('Yeh button agla version mein chalega')));
 
 void main() => runApp(MaterialApp(
-      title: 'Router Manager',
-      theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.green),
+      title: 'Mera Router',
+      theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.teal),
       home: const LoginPage(),
     ));
 
@@ -102,161 +40,84 @@ class _LoginPageState extends State<LoginPage> {
   final ip = TextEditingController(text: '192.168.1.1');
   final user = TextEditingController(text: 'admin');
   final pass = TextEditingController();
+  bool busy = false, hide = true;
   String? err;
-  bool busy = false;
 
   Future<void> go() async {
     setState(() { busy = true; err = null; });
-    final r = Router(ip.text.trim(), user.text.trim(), pass.text);
+    final api = Api(ip.text.trim(), user.text.trim(), pass.text);
     try {
-      if (await r.login()) {
+      if (await api.login()) {
         if (!mounted) return;
-        Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => Home(r)));
+        Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => Home(api)));
         return;
       }
       err = 'Login nakam. Username/password check karein.';
     } catch (e) {
-      err = 'Router tak nahi pahunch saka. WiFi se connected hain? ($e)';
+      err = 'Router tak nahi pahunch saka. Ghar ke WiFi se connected hain?';
     }
     if (mounted) setState(() => busy = false);
   }
 
   @override
   Widget build(BuildContext c) => Scaffold(
-        appBar: AppBar(title: const Text('Router Login')),
-        body: ListView(padding: const EdgeInsets.all(16), children: [
-          TextField(controller: ip, decoration: const InputDecoration(labelText: 'Router IP')),
-          TextField(controller: user, decoration: const InputDecoration(labelText: 'Username')),
-          TextField(controller: pass, obscureText: true, decoration: const InputDecoration(labelText: 'Password')),
-          const SizedBox(height: 16),
-          FilledButton(onPressed: busy ? null : go, child: Text(busy ? '...' : 'Login')),
-          if (err != null) Padding(padding: const EdgeInsets.only(top: 12), child: Text(err!, style: const TextStyle(color: Colors.red))),
-        ]),
+        backgroundColor: const Color(0xFFE6F4F1),
+        body: SafeArea(
+          child: ListView(padding: const EdgeInsets.all(24), children: [
+            const SizedBox(height: 30),
+            const Icon(Icons.router, size: 80, color: Colors.teal),
+            const Text('Mera Router', textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold)),
+            const Text('Sirf ghar ka WiFi / LAN control', textAlign: TextAlign.center),
+            const SizedBox(height: 24),
+            Card(
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+              child: Padding(
+                padding: const EdgeInsets.all(20),
+                child: Column(children: [
+                  TextField(controller: ip, decoration: const InputDecoration(
+                      labelText: 'Router IP', prefixIcon: Icon(Icons.router))),
+                  TextField(controller: user, decoration: const InputDecoration(
+                      labelText: 'Username', prefixIcon: Icon(Icons.person))),
+                  TextField(
+                    controller: pass, obscureText: hide,
+                    decoration: InputDecoration(
+                      labelText: 'Password', prefixIcon: const Icon(Icons.lock),
+                      suffixIcon: IconButton(
+                          icon: Icon(hide ? Icons.visibility : Icons.visibility_off),
+                          onPressed: () => setState(() => hide = !hide)),
+                    ),
+                  ),
+                ]),
+              ),
+            ),
+            const SizedBox(height: 16),
+            FilledButton(onPressed: busy ? null : go,
+                child: Padding(padding: const EdgeInsets.all(12),
+                    child: Text(busy ? 'Connect ho raha hai...' : 'Login'))),
+            if (err != null)
+              Padding(padding: const EdgeInsets.only(top: 12),
+                  child: Text(err!, style: const TextStyle(color: Colors.red))),
+          ]),
+        ),
       );
 }
 
 class Home extends StatefulWidget {
-  final Router r;
-  const Home(this.r, {super.key});
+  final Api api;
+  const Home(this.api, {super.key});
   @override
   State<Home> createState() => _HomeState();
 }
 
 class _HomeState extends State<Home> {
   int tab = 0;
-  @override
-  Widget build(BuildContext c) {
-    final pages = [WifiTab(widget.r), DevicesTab(widget.r), DebugTab(widget.r)];
-    return Scaffold(
-      appBar: AppBar(title: const Text('Router Manager'), actions: [
-        IconButton(
-          icon: const Icon(Icons.restart_alt),
-          tooltip: 'Reboot',
-          onPressed: () async {
-            final ok = await showDialog<bool>(
-              context: c,
-              builder: (_) => AlertDialog(title: const Text('Router reboot karein?'), actions: [
-                TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Nahi')),
-                TextButton(onPressed: () => Navigator.pop(c, true), child: const Text('Haan')),
-              ]),
-            );
-            if (ok == true) { try { await widget.r.reboot(); } catch (_) {} }
-          },
-        ),
-      ]),
-      body: pages[tab],
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: tab,
-        onDestinationSelected: (i) => setState(() => tab = i),
-        destinations: const [
-          NavigationDestination(icon: Icon(Icons.wifi), label: 'WiFi'),
-          NavigationDestination(icon: Icon(Icons.devices), label: 'Devices'),
-          NavigationDestination(icon: Icon(Icons.bug_report), label: 'Debug'),
-        ],
-      ),
-    );
-  }
-}
-
-void snack(BuildContext c, String m) =>
-    ScaffoldMessenger.of(c).showSnackBar(SnackBar(content: Text(m)));
-
-class WifiTab extends StatelessWidget {
-  final Router r;
-  const WifiTab(this.r, {super.key});
-  @override
-  Widget build(BuildContext c) => ListView(
-        padding: const EdgeInsets.all(12),
-        children: [for (final b in Cfg.bands.keys) BandCard(r, b)],
-      );
-}
-
-class BandCard extends StatefulWidget {
-  final Router r;
-  final String band;
-  const BandCard(this.r, this.band, {super.key});
-  @override
-  State<BandCard> createState() => _BandCardState();
-}
-
-class _BandCardState extends State<BandCard> {
-  final ssid = TextEditingController();
-  final pw = TextEditingController();
-  bool on = true;
-
-  Future<void> run(String ok, Future<void> Function() f) async {
-    try { await f(); if (mounted) snack(context, ok); }
-    catch (e) { if (mounted) snack(context, 'Error: $e'); }
-  }
-
-  @override
-  Widget build(BuildContext c) => Card(
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(Cfg.bands[widget.band]!, style: Theme.of(c).textTheme.titleLarge),
-            SwitchListTile(
-              title: const Text('WiFi on/off'),
-              value: on,
-              onChanged: (v) {
-                setState(() => on = v);
-                run(v ? 'WiFi on' : 'WiFi off', () => widget.r.setBasic(widget.band, enabled: v));
-              },
-            ),
-            TextField(controller: ssid, decoration: const InputDecoration(labelText: 'Naya WiFi naam (SSID)')),
-            TextButton(
-              onPressed: () { if (ssid.text.isNotEmpty) run('Naam change hua', () => widget.r.setBasic(widget.band, ssid: ssid.text)); },
-              child: const Text('Naam change karein'),
-            ),
-            TextField(controller: pw, decoration: const InputDecoration(labelText: 'Naya password (kam az kam 8 characters)')),
-            TextButton(
-              onPressed: () {
-                if (pw.text.length < 8) { snack(c, 'Password kam az kam 8 characters ka ho'); return; }
-                run('Password change hua', () => widget.r.setPassword(widget.band, pw.text));
-              },
-              child: const Text('Password change karein'),
-            ),
-          ]),
-        ),
-      );
-}
-
-class DevicesTab extends StatefulWidget {
-  final Router r;
-  const DevicesTab(this.r, {super.key});
-  @override
-  State<DevicesTab> createState() => _DevicesTabState();
-}
-
-class _DevicesTabState extends State<DevicesTab> {
-  final Map<String, List<String>> data = {};
-  bool busy = false;
+  List<String> macs = [];
+  bool busy = true;
 
   Future<void> load() async {
     setState(() => busy = true);
-    for (final b in Cfg.bands.keys) {
-      try { data[b] = await widget.r.clients(b); } catch (_) { data[b] = []; }
-    }
+    try { macs = await widget.api.clients(); } catch (_) {}
     if (mounted) setState(() => busy = false);
   }
 
@@ -264,40 +125,200 @@ class _DevicesTabState extends State<DevicesTab> {
   void initState() { super.initState(); load(); }
 
   @override
-  Widget build(BuildContext c) => RefreshIndicator(
-        onRefresh: load,
-        child: ListView(children: [
-          if (busy) const LinearProgressIndicator(),
-          for (final b in Cfg.bands.keys) ...[
-            Padding(padding: const EdgeInsets.all(12), child: Text('${Cfg.bands[b]} devices', style: Theme.of(c).textTheme.titleMedium)),
-            if ((data[b] ?? []).isEmpty) const ListTile(title: Text('Koi device nahi')),
-            for (final mac in data[b] ?? [])
-              ListTile(
-                leading: const Icon(Icons.smartphone),
-                title: Text(mac),
-                trailing: TextButton(
-                  onPressed: () async {
-                    try { await widget.r.block(b, mac); if (c.mounted) snack(c, 'Block ho gaya'); }
-                    catch (e) { if (c.mounted) snack(c, 'Error: $e'); }
-                  },
-                  child: const Text('Block'),
-                ),
-              ),
-          ],
-        ]),
-      );
+  Widget build(BuildContext c) {
+    const titles = ['Dashboard', 'Connected Devices', 'Wi-Fi Settings'];
+    final pages = [Dash(macs.length, busy), DevicesTab(macs), const WifiTab()];
+    return Scaffold(
+      appBar: AppBar(title: Text(titles[tab]),
+          actions: [IconButton(icon: const Icon(Icons.refresh), onPressed: load)]),
+      body: pages[tab],
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: tab,
+        onDestinationSelected: (i) => setState(() => tab = i),
+        destinations: const [
+          NavigationDestination(icon: Icon(Icons.dashboard), label: 'Dashboard'),
+          NavigationDestination(icon: Icon(Icons.devices), label: 'Devices'),
+          NavigationDestination(icon: Icon(Icons.wifi), label: 'Wi-Fi'),
+        ],
+      ),
+    );
+  }
 }
 
-class DebugTab extends StatelessWidget {
-  final Router r;
-  const DebugTab(this.r, {super.key});
+class Dash extends StatelessWidget {
+  final int n;
+  final bool busy;
+  const Dash(this.n, this.busy, {super.key});
   @override
-  Widget build(BuildContext c) => ListView(
-        padding: const EdgeInsets.all(12),
+  Widget build(BuildContext c) {
+    final tiles = [
+      [Icons.public, 'WAN Status', 'Connection info'],
+      [Icons.devices, 'Devices', '$n connected'],
+      [Icons.wifi, 'Wi-Fi', 'Naam aur password'],
+      [Icons.pie_chart, 'Usage', 'Traffic statistics'],
+    ];
+    return ListView(padding: const EdgeInsets.all(16), children: [
+      Container(
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(
+          gradient: const LinearGradient(colors: [Color(0xFF0F9D58), Color(0xFF34D399)]),
+          borderRadius: BorderRadius.circular(28),
+        ),
+        child: Column(children: [
+          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+            const Text('DIR-803', style: TextStyle(
+                color: Colors.white, fontSize: 26, fontWeight: FontWeight.bold)),
+            Chip(label: Text(busy ? '...' : 'ONLINE')),
+          ]),
+          const Align(alignment: Alignment.centerLeft,
+              child: Text('192.168.1.1', style: TextStyle(color: Colors.white70))),
+          const SizedBox(height: 16),
+          const Icon(Icons.router, size: 90, color: Colors.white),
+          const SizedBox(height: 12),
+          Text('$n devices', style: const TextStyle(color: Colors.white, fontSize: 18)),
+        ]),
+      ),
+      const SizedBox(height: 16),
+      GridView.count(
+        crossAxisCount: 2, shrinkWrap: true,
+        physics: const NeverScrollableScrollPhysics(),
+        childAspectRatio: 1.5, crossAxisSpacing: 12, mainAxisSpacing: 12,
         children: [
-          const Text('Agar koi cheez na chale to is screen ka screenshot bhejein.'),
-          const Divider(),
-          for (final l in r.log.reversed) Padding(padding: const EdgeInsets.only(bottom: 8), child: Text(l, style: const TextStyle(fontSize: 12))),
+          for (final t in tiles)
+            InkWell(
+              onTap: () => soon(c),
+              child: Card(child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(t[0] as IconData),
+                    Text(t[1] as String, style: const TextStyle(fontWeight: FontWeight.bold)),
+                    Text(t[2] as String, style: const TextStyle(fontSize: 12)),
+                  ],
+                ),
+              )),
+            ),
         ],
+      ),
+    ]);
+  }
+}
+
+class DevicesTab extends StatelessWidget {
+  final List<String> macs;
+  const DevicesTab(this.macs, {super.key});
+  @override
+  Widget build(BuildContext c) => ListView(padding: const EdgeInsets.all(16), children: [
+        Row(children: [
+          Expanded(child: Card(child: ListTile(
+              leading: const Icon(Icons.devices, color: Colors.teal),
+              title: Text('${macs.length}'), subtitle: const Text('Connected')))),
+          const Expanded(child: Card(child: ListTile(
+              leading: Icon(Icons.block, color: Colors.red),
+              title: Text('0'), subtitle: Text('Blocked')))),
+        ]),
+        Card(
+          color: const Color(0xFFD7F0EA),
+          child: const Padding(padding: EdgeInsets.all(12),
+              child: Text('Block buttons agle version mein kaam karenge.')),
+        ),
+        for (final m in macs)
+          Card(child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                const Icon(Icons.wifi, color: Colors.deepPurple),
+                const SizedBox(width: 12),
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  const Text('Device', style: TextStyle(fontWeight: FontWeight.bold)),
+                  Text(m, style: const TextStyle(fontFamily: 'monospace')),
+                ])),
+              ]),
+              const SizedBox(height: 10),
+              Row(children: [
+                Expanded(child: FilledButton.tonal(
+                    style: FilledButton.styleFrom(foregroundColor: Colors.red),
+                    onPressed: () => soon(c), child: const Text('Block 2.4G'))),
+                const SizedBox(width: 8),
+                Expanded(child: FilledButton.tonal(
+                    style: FilledButton.styleFrom(foregroundColor: Colors.red),
+                    onPressed: () => soon(c), child: const Text('Block 5G'))),
+              ]),
+              const SizedBox(height: 8),
+              SizedBox(width: double.infinity, child: FilledButton.tonal(
+                  style: FilledButton.styleFrom(foregroundColor: Colors.red),
+                  onPressed: () => soon(c), child: const Text('Block Internet'))),
+            ]),
+          )),
+      ]);
+}
+
+class WifiTab extends StatefulWidget {
+  const WifiTab({super.key});
+  @override
+  State<WifiTab> createState() => _WifiTabState();
+}
+
+class _WifiTabState extends State<WifiTab> {
+  String band = '2.4GHz';
+  bool enable = true, hideSsid = false, obscure = true;
+
+  Widget field(String label) => Padding(
+        padding: const EdgeInsets.only(top: 12),
+        child: TextField(decoration: InputDecoration(
+            labelText: label, border: const OutlineInputBorder())),
+      );
+
+  Widget save(BuildContext c) => Padding(
+        padding: const EdgeInsets.only(top: 16),
+        child: FilledButton(onPressed: () => soon(c),
+            child: const Padding(padding: EdgeInsets.all(12), child: Text('Save'))),
+      );
+
+  @override
+  Widget build(BuildContext c) => DefaultTabController(
+        length: 3,
+        child: Column(children: [
+          const TabBar(tabs: [Tab(text: 'SSID'), Tab(text: 'Security'), Tab(text: 'Guest')]),
+          Expanded(child: TabBarView(children: [
+            ListView(padding: const EdgeInsets.all(16), children: [
+              DropdownButtonFormField<String>(
+                value: band,
+                decoration: const InputDecoration(
+                    labelText: 'Choose SSID', border: OutlineInputBorder()),
+                items: const [
+                  DropdownMenuItem(value: '2.4GHz', child: Text('2.4GHz')),
+                  DropdownMenuItem(value: '5GHz', child: Text('5GHz')),
+                ],
+                onChanged: (v) => setState(() => band = v!),
+              ),
+              SwitchListTile(title: const Text('SSID Enable'), value: enable,
+                  onChanged: (v) => setState(() => enable = v)),
+              SwitchListTile(title: const Text('Broadcast band karein'), value: !hideSsid,
+                  onChanged: (v) => setState(() => hideSsid = !v)),
+              field('SSID Name'),
+              save(c),
+            ]),
+            ListView(padding: const EdgeInsets.all(16), children: [
+              TextField(
+                obscureText: obscure,
+                decoration: InputDecoration(
+                  labelText: 'Wi-Fi Password', border: const OutlineInputBorder(),
+                  suffixIcon: IconButton(
+                      icon: Icon(obscure ? Icons.visibility : Icons.visibility_off),
+                      onPressed: () => setState(() => obscure = !obscure)),
+                ),
+              ),
+              save(c),
+            ]),
+            ListView(padding: const EdgeInsets.all(16), children: [
+              field('Guest Network Name (SSID)'),
+              field('Guest Password'),
+              save(c),
+            ]),
+          ])),
+        ]),
       );
 }
