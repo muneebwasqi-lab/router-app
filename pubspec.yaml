@@ -1,0 +1,12 @@
+name: router_app
+description: D-Link DIR-803 (Etisalat) router manager
+publish_to: none
+version: 0.1.0
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.0
+flutter:
+  uses-material-design: true
